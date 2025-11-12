@@ -48,6 +48,7 @@ class PipelineConfig:
     container_name: str
     raw_blob_name: str
     merged_blob_name: str
+    processed_blob_name: str
     output_path: Path
     station_id: str
     start: datetime
@@ -189,6 +190,61 @@ def merge_datasets(power_df: pd.DataFrame, weather_df: pd.DataFrame) -> pd.DataF
     return merged
 
 
+def clean_data(df_merged: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean and preprocess the merged dataset by:
+    - Dropping useless columns
+    - Filling missing values
+    - Performing time-based interpolation
+    - Creating time-based features
+    - Creating lag features
+    """
+    logger.info("Starting data cleaning and preprocessing")
+
+    # Drop useless columns
+    cols_to_drop = ["snow", "wpgt", "tsun", "coco"]
+    # Only drop columns that exist in the dataframe
+    cols_to_drop = [col for col in cols_to_drop if col in df_merged.columns]
+    if cols_to_drop:
+        df_merged.drop(columns=cols_to_drop, inplace=True)
+        logger.info("Dropped useless columns: %s", cols_to_drop)
+
+    # Fill missing 'prcp' with 0
+    if "prcp" in df_merged.columns:
+        df_merged["prcp"].fillna(0, inplace=True)
+        logger.info("Filled missing 'prcp' with 0")
+
+    # Perform time-based interpolation on all remaining gaps
+    df_merged.interpolate(method="time", inplace=True)
+    logger.info("Performed time-based interpolation on all remaining gaps")
+
+    # Create new time-based features
+    df_merged["hour_of_day"] = df_merged.index.hour
+    df_merged["day_of_week"] = df_merged.index.dayofweek  # 0=Monday, 6=Sunday
+    df_merged["month_of_year"] = df_merged.index.month
+    df_merged["is_weekend"] = (
+        df_merged["day_of_week"].isin([5, 6]).astype(int)
+    )  # 1 if True, 0 if False
+    logger.info("Engineered time-based features (hour, day, month, weekend)")
+
+    # Create lag features
+    if "Global_active_power" in df_merged.columns:
+        df_merged["lag_power_1h"] = df_merged["Global_active_power"].shift(1)
+        df_merged["lag_power_24h"] = df_merged["Global_active_power"].shift(24)
+
+    if "temp" in df_merged.columns:
+        df_merged["lag_temp_1h"] = df_merged["temp"].shift(1)
+
+    # Drop initial NaN rows created by lag features
+    df_merged.dropna(inplace=True)
+    logger.info("Dropped initial NaN rows. Data is clean and ready")
+
+    logger.debug("Final processed data shape: %s", df_merged.shape)
+    logger.debug("Final processed data head:\n%s", df_merged.head())
+
+    return df_merged
+
+
 def save_dataframe(df: pd.DataFrame, output_path: Path) -> None:
     logger.info("Writing merged dataset to %s", output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,9 +261,14 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
 
     raw_blob_name = f"{raw_prefix}/{FILE_TO_EXTRACT}" if raw_prefix else FILE_TO_EXTRACT
     merged_blob_name = (
-        f"{processed_prefix}/merged_power_and_weather.csv"
-        if processed_prefix
+        f"{raw_prefix}/merged_power_and_weather.csv"
+        if raw_prefix
         else "merged_power_and_weather.csv"
+    )
+    processed_blob_name = (
+        f"{processed_prefix}/processed_power_and_weather.csv"
+        if processed_prefix
+        else "processed_power_and_weather.csv"
     )
 
     output_path = Path(
@@ -225,6 +286,7 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
         container_name=container_name,
         raw_blob_name=raw_blob_name,
         merged_blob_name=merged_blob_name,
+        processed_blob_name=processed_blob_name,
         output_path=output_path,
         station_id=args.station_id,
         start=args.start,
@@ -257,10 +319,39 @@ def run_pipeline(
     weather_df = fetch_weather_data(config.station_id, config.start, config.end)
     merged_df = merge_datasets(hourly_power, weather_df)
 
+    # Save merged data (before cleaning)
     save_dataframe(merged_df, config.output_path)
 
     if upload_merged and blob_container is not None:
         upload_blob_file(blob_container, config.merged_blob_name, config.output_path)
+
+    # Clean and process the data
+    processed_df = clean_data(merged_df.copy())
+
+    # Save processed data to current directory
+    processed_output_path = Path("processed_power_and_weather.csv")
+    save_dataframe(processed_df, processed_output_path)
+    logger.info("Saved processed data to %s", processed_output_path.absolute())
+
+    # Upload processed data to processed container
+    if upload_merged and blob_container is not None:
+        try:
+            upload_blob_file(
+                blob_container, config.processed_blob_name, processed_output_path
+            )
+            logger.info(
+                "Successfully uploaded processed data to %s in container %s",
+                config.processed_blob_name,
+                config.container_name,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to upload processed data to Azure: %s", exc, exc_info=True
+            )
+            logger.warning(
+                "Processed data saved locally at %s but not uploaded to Azure",
+                processed_output_path.absolute(),
+            )
 
     return config.output_path
 
