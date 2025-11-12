@@ -5,6 +5,8 @@ from datetime import datetime
 from meteostat import Hourly, Stations
 from azure.storage.blob import BlobServiceClient
 import io
+import zipfile
+import os
 
 
 try:
@@ -29,8 +31,71 @@ except Exception as e:
     print('failed at db connection')
     print(e)
 
+
+# --- 1. Configuration ---
+# Source URL for the ZIP file
+# Updated URL: UCI ML repository was restructured; using the direct download link
+ZIP_URL = "https://archive.ics.uci.edu/static/public/235/individual+household+electric+power+consumption.zip"
+# The name of the unzipped file you want to upload
+FILE_TO_EXTRACT = "household_power_consumption.txt" 
+
+# Azure Blob Storage Configuration
+AZURE_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=greenpowerstorage;AccountKey=GNvSIF/x7DFrDBBDiuyRVBRjGBs3J41+TNnUBjiiO0Pj/BImCvK7Bp5fCnzmYw+RV5ucKtrT17D4+AStt6eZ5Q==;EndpointSuffix=core.windows.net"
+CONTAINER_NAME = "greenpowerstorage-container"
+BLOB_NAME = FILE_TO_EXTRACT # The final name of the blob in Azure
+
+# --- 2. Download the ZIP File into Memory ---
+print(f"Downloading ZIP file from: {ZIP_URL}")
+try:
+    response = requests.get(ZIP_URL, stream=True)
+    response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+    
+    # Use io.BytesIO to hold the downloaded zip content in memory
+    zip_in_memory = io.BytesIO(response.content)
+    print("Download complete. Content stored in memory.")
+
+except requests.exceptions.RequestException as e:
+    print(f"Error during download: {e}")
+    exit()
+
+unzipped_content = None
+print(f"Attempting to extract: {FILE_TO_EXTRACT}")
+
+try:
+    with zipfile.ZipFile(zip_in_memory, 'r') as zf:
+        if FILE_TO_EXTRACT in zf.namelist():
+            unzipped_content = zf.read(FILE_TO_EXTRACT)
+            print(f"Successfully extracted {FILE_TO_EXTRACT} content.")
+        else:
+            print(f"Error: {FILE_TO_EXTRACT} not found in the ZIP archive.")
+            print(f"Files found in ZIP: {zf.namelist()}")
+            exit()
+except Exception as e:
+    print(f"Error during unzipping: {e}")
+    exit()
+
+# --- 4. Upload the Unzipped Content to Azure Blob Storage ---
+print(f"Connecting to Azure Blob Storage container: {CONTAINER_NAME}")
+
+try:
+    # Create the BlobServiceClient
+    blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+    container_client = blob_service_client.get_container_client(CONTAINER_NAME)
+    
+    # Create a BlobClient for the target file
+    blob_client = container_client.get_blob_client(BLOB_NAME)
+
+    # Upload the content
+    print(f"Uploading content to blob: {BLOB_NAME}")
+    blob_client.upload_blob(unzipped_content, overwrite=True)
+    
+    print("\n✅ Success!")
+    print(f"File uploaded to Azure Blob Storage as: {BLOB_NAME}")
+
+except Exception as e:
+    print(f"Error during Azure upload: {e}")
+
 # --- 1. Azure Blob Storage Configuration ---
-# !! IMPORTANT: Paste your Azure Storage Connection String here !!
 AZURE_CONNECTION_STRING = "DefaultEndpointsProtocol=https;AccountName=greenpowerstorage;AccountKey=GNvSIF/x7DFrDBBDiuyRVBRjGBs3J41+TNnUBjiiO0Pj/BImCvK7Bp5fCnzmYw+RV5ucKtrT17D4+AStt6eZ5Q==;EndpointSuffix=core.windows.net"
 CONTAINER_NAME = "greenpowerstorage-container" 
 BLOB_NAME = "household_power_consumption.txt" 
@@ -120,15 +185,7 @@ print(df_weather.head(30))
 
 try:
     print("\n--- Merging hourly power data and weather data ---")
-    
-    # Check the data types of the indexes
-    # Both must be DatetimeIndex for this to work
-    print(f"Power data index type: {type(df_hourly.index)}")
-    print(f"Weather data index type: {type(df_weather.index)}")
 
-    # Perform an inner merge on the DataFrame indexes.
-    # left_index=True and right_index=True tells pandas to
-    # use the indexes from both DataFrames as the join key.
     df_merged = pd.merge(
         df_hourly, 
         df_weather, 
@@ -140,8 +197,33 @@ try:
     print("--- Merge Successful ---")
     print(df_merged.head(30))
     
-    # This df_merged is now your final, clean, and aligned dataset
-    # ready for the database and for feature engineering.
+    cols_to_drop = ['snow', 'wpgt', 'tsun', 'coco']
+    df_merged.drop(columns=cols_to_drop, inplace=True)
+    print(" Dropped useless columns.")
+
+    df_merged['prcp'].fillna(0, inplace=True)
+    print(" Filled missing 'prcp' with 0.")
+
+    df_merged.interpolate(method='time', inplace=True)
+    print("Performed time-based interpolation on all remaining gaps.")
+
+    # Create new time-based features
+    df_merged['hour_of_day'] = df_merged.index.hour
+    df_merged['day_of_week'] = df_merged.index.dayofweek  # 0=Monday, 6=Sunday
+    df_merged['month_of_year'] = df_merged.index.month
+    df_merged['is_weekend'] = df_merged['day_of_week'].isin([5, 6]).astype(int) # 1 if True, 0 if False
+    print("Step 4: Engineered time-based features (hour, day, month, weekend).")
+
+    # Create lag features
+    df_merged['lag_power_1h'] = df_merged['Global_active_power'].shift(1)
+    df_merged['lag_power_24h'] = df_merged['Global_active_power'].shift(24)
+    df_merged['lag_temp_1h'] = df_merged['temp'].shift(1)
+
+    df.dropna(inplace=True)
+    print("\n Dropped initial NaN rows. Data is clean and ready.") 
+
+    print("\n--- Final Processed Data (Ready for Database) ---")
+    print(df_merged.head())
 
 except NameError:
     print("\nError: 'df_hourly' or 'df_weather' not found.")
