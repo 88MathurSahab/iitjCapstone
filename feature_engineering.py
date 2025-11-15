@@ -18,20 +18,20 @@ logger = logging.getLogger(__name__)
 def compute_daily_aggregates(
     connection_string: str,
     start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None,
 ) -> int:
     """
     Compute daily aggregated features from hourly data.
-    
+
     Returns:
         Number of daily records created
     """
     logger.info("Computing daily aggregates")
-    
+
     try:
         with pyodbc.connect(connection_string, timeout=120) as conn:
             cursor = conn.cursor()
-            
+
             # Build date filter
             date_filter = ""
             params = []
@@ -41,7 +41,7 @@ def compute_daily_aggregates(
             if end_date:
                 date_filter += " AND datetime_utc <= ?"
                 params.append(end_date)
-            
+
             # Delete existing daily aggregates for the date range
             delete_query = f"""
                 DELETE FROM power_consumption_daily
@@ -50,7 +50,7 @@ def compute_daily_aggregates(
             if start_date and end_date:
                 cursor.execute(delete_query, (start_date.date(), end_date.date()))
                 conn.commit()
-            
+
             # Compute and insert daily aggregates
             insert_query = f"""
                 INSERT INTO power_consumption_daily (
@@ -107,14 +107,14 @@ def compute_daily_aggregates(
                 GROUP BY CAST(datetime_utc AS DATE)
                 ORDER BY date_utc
             """
-            
+
             cursor.execute(insert_query, params)
             rows_affected = cursor.rowcount
             conn.commit()
-            
+
             logger.info("Created %d daily aggregate records", rows_affected)
             return rows_affected
-            
+
     except Exception as exc:
         logger.error("Failed to compute daily aggregates: %s", exc, exc_info=True)
         raise
@@ -124,26 +124,26 @@ def compute_peak_load_stats(
     connection_string: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-    aggregation_period: str = "daily"
+    aggregation_period: str = "daily",
 ) -> int:
     """
     Compute peak load statistics.
-    
+
     Args:
         connection_string: Database connection string
         start_date: Start date for computation
         end_date: End date for computation
         aggregation_period: 'hourly', 'daily', or 'monthly'
-    
+
     Returns:
         Number of records created
     """
     logger.info("Computing peak load statistics for period: %s", aggregation_period)
-    
+
     try:
         with pyodbc.connect(connection_string, timeout=120) as conn:
             cursor = conn.cursor()
-            
+
             # Build date filter
             date_filter = ""
             params = []
@@ -153,7 +153,7 @@ def compute_peak_load_stats(
             if end_date:
                 date_filter += " AND datetime_utc <= ?"
                 params.append(end_date)
-            
+
             # Determine grouping based on aggregation period
             if aggregation_period == "hourly":
                 group_by = "CAST(datetime_utc AS DATE), DATEPART(HOUR, datetime_utc)"
@@ -166,16 +166,19 @@ def compute_peak_load_stats(
                 date_expr = "DATEFROMPARTS(YEAR(datetime_utc), MONTH(datetime_utc), 1)"
             else:
                 raise ValueError(f"Unknown aggregation_period: {aggregation_period}")
-            
+
             # Delete existing stats for the period
             delete_query = """
                 DELETE FROM peak_load_stats
                 WHERE aggregation_period = ? AND date_utc >= CAST(? AS DATE) AND date_utc <= CAST(? AS DATE)
             """
             if start_date and end_date:
-                cursor.execute(delete_query, (aggregation_period, start_date.date(), end_date.date()))
+                cursor.execute(
+                    delete_query,
+                    (aggregation_period, start_date.date(), end_date.date()),
+                )
                 conn.commit()
-            
+
             # Compute peak load statistics
             # Use a simpler approach with window functions
             if aggregation_period == "hourly":
@@ -291,15 +294,15 @@ def compute_peak_load_stats(
                     INNER JOIN AggregatedData a ON p.date_utc = a.date_utc
                     ORDER BY p.date_utc
                 """
-            
+
             params.insert(0, aggregation_period)
             cursor.execute(insert_query, params)
             rows_affected = cursor.rowcount
             conn.commit()
-            
+
             logger.info("Created %d peak load statistics records", rows_affected)
             return rows_affected
-            
+
     except Exception as exc:
         logger.error("Failed to compute peak load statistics: %s", exc, exc_info=True)
         raise
@@ -309,22 +312,22 @@ def compute_weather_correlations(
     connection_string: str,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-    aggregation_period: str = "daily"
+    aggregation_period: str = "daily",
 ) -> int:
     """
     Compute weather-energy correlations using Pearson correlation.
-    
+
     Args:
         connection_string: Database connection string
         start_date: Start date for computation
         end_date: End date for computation
         aggregation_period: 'hourly', 'daily', or 'monthly'
-    
+
     Returns:
         Number of records created
     """
     logger.info("Computing weather correlations for period: %s", aggregation_period)
-    
+
     try:
         with pyodbc.connect(connection_string, timeout=120) as conn:
             # Load data into pandas for correlation computation
@@ -336,7 +339,7 @@ def compute_weather_correlations(
             if end_date:
                 date_filter += " AND datetime_utc <= ?"
                 params.append(end_date)
-            
+
             query = f"""
                 SELECT
                     datetime_utc,
@@ -348,126 +351,173 @@ def compute_weather_correlations(
                     precipitation
                 FROM power_consumption_hourly
                 WHERE datetime_utc IS NOT NULL
-                  AND global_active_power IS NOT NULL {date_filter}
+                  AND global_active_power IS NOT NULL
                 ORDER BY datetime_utc
             """
-            
+
             df = pd.read_sql(query, conn, params=params)
-            
+
             if len(df) == 0:
                 logger.warning("No data found for correlation computation")
                 return 0
-            
+
             # Aggregate by period if needed
             if aggregation_period == "daily":
                 df["date"] = pd.to_datetime(df["datetime_utc"]).dt.date
-                df_agg = df.groupby("date").agg({
-                    "global_active_power": "mean",
-                    "temperature": "mean",
-                    "relative_humidity": "mean",
-                    "pressure": "mean",
-                    "wind_speed": "mean",
-                    "precipitation": "sum"
-                }).reset_index()
+                df_agg = (
+                    df.groupby("date")
+                    .agg(
+                        {
+                            "global_active_power": "mean",
+                            "temperature": "mean",
+                            "relative_humidity": "mean",
+                            "pressure": "mean",
+                            "wind_speed": "mean",
+                            "precipitation": "sum",
+                        }
+                    )
+                    .reset_index()
+                )
                 date_col = "date"
             elif aggregation_period == "monthly":
                 df["year_month"] = pd.to_datetime(df["datetime_utc"]).dt.to_period("M")
-                df_agg = df.groupby("year_month").agg({
-                    "global_active_power": "mean",
-                    "temperature": "mean",
-                    "relative_humidity": "mean",
-                    "pressure": "mean",
-                    "wind_speed": "mean",
-                    "precipitation": "sum"
-                }).reset_index()
+                df_agg = (
+                    df.groupby("year_month")
+                    .agg(
+                        {
+                            "global_active_power": "mean",
+                            "temperature": "mean",
+                            "relative_humidity": "mean",
+                            "pressure": "mean",
+                            "wind_speed": "mean",
+                            "precipitation": "sum",
+                        }
+                    )
+                    .reset_index()
+                )
                 df_agg["date"] = df_agg["year_month"].dt.to_timestamp()
                 date_col = "date"
             else:  # hourly
                 df_agg = df.copy()
                 df_agg["date"] = pd.to_datetime(df_agg["datetime_utc"]).dt.date
                 date_col = "date"
-            
+
             # Compute correlations
             correlations = []
-            
+
             for date_val in df_agg[date_col].unique():
                 date_data = df_agg[df_agg[date_col] == date_val]
-                
+
                 if len(date_data) < 2:
                     continue
-                
+
                 power = date_data["global_active_power"].values
-                
+
                 # Compute correlations
                 corr_data = {
-                    "date_utc": pd.to_datetime(date_val).date() if isinstance(date_val, str) else date_val,
+                    "date_utc": (
+                        pd.to_datetime(date_val).date()
+                        if isinstance(date_val, str)
+                        else date_val
+                    ),
                     "aggregation_period": aggregation_period,
-                    "sample_count": len(date_data)
+                    "sample_count": len(date_data),
                 }
-                
+
                 # Temperature correlation
-                if "temperature" in date_data.columns and date_data["temperature"].notna().sum() > 1:
+                if (
+                    "temperature" in date_data.columns
+                    and date_data["temperature"].notna().sum() > 1
+                ):
                     temp = date_data["temperature"].values
                     if len(temp) > 1 and np.std(temp) > 0:
                         corr, p_value = stats.pearsonr(power, temp)
-                        corr_data["temp_power_correlation"] = corr if not np.isnan(corr) else None
-                        
+                        corr_data["temp_power_correlation"] = (
+                            corr if not np.isnan(corr) else None
+                        )
+
                         # Linear regression
                         slope, intercept, r_value, _, _ = stats.linregress(temp, power)
-                        corr_data["temp_power_slope"] = slope if not np.isnan(slope) else None
-                        corr_data["temp_power_intercept"] = intercept if not np.isnan(intercept) else None
-                        corr_data["temp_power_r_squared"] = r_value ** 2 if not np.isnan(r_value) else None
+                        corr_data["temp_power_slope"] = (
+                            slope if not np.isnan(slope) else None
+                        )
+                        corr_data["temp_power_intercept"] = (
+                            intercept if not np.isnan(intercept) else None
+                        )
+                        corr_data["temp_power_r_squared"] = (
+                            r_value**2 if not np.isnan(r_value) else None
+                        )
                     else:
                         corr_data["temp_power_correlation"] = None
                 else:
                     corr_data["temp_power_correlation"] = None
-                
+
                 # Humidity correlation
-                if "relative_humidity" in date_data.columns and date_data["relative_humidity"].notna().sum() > 1:
+                if (
+                    "relative_humidity" in date_data.columns
+                    and date_data["relative_humidity"].notna().sum() > 1
+                ):
                     humidity = date_data["relative_humidity"].values
                     if len(humidity) > 1 and np.std(humidity) > 0:
                         corr, _ = stats.pearsonr(power, humidity)
-                        corr_data["humidity_power_correlation"] = corr if not np.isnan(corr) else None
+                        corr_data["humidity_power_correlation"] = (
+                            corr if not np.isnan(corr) else None
+                        )
                     else:
                         corr_data["humidity_power_correlation"] = None
                 else:
                     corr_data["humidity_power_correlation"] = None
-                
+
                 # Pressure correlation
-                if "pressure" in date_data.columns and date_data["pressure"].notna().sum() > 1:
+                if (
+                    "pressure" in date_data.columns
+                    and date_data["pressure"].notna().sum() > 1
+                ):
                     pressure = date_data["pressure"].values
                     if len(pressure) > 1 and np.std(pressure) > 0:
                         corr, _ = stats.pearsonr(power, pressure)
-                        corr_data["pressure_power_correlation"] = corr if not np.isnan(corr) else None
+                        corr_data["pressure_power_correlation"] = (
+                            corr if not np.isnan(corr) else None
+                        )
                     else:
                         corr_data["pressure_power_correlation"] = None
                 else:
                     corr_data["pressure_power_correlation"] = None
-                
+
                 # Wind speed correlation
-                if "wind_speed" in date_data.columns and date_data["wind_speed"].notna().sum() > 1:
+                if (
+                    "wind_speed" in date_data.columns
+                    and date_data["wind_speed"].notna().sum() > 1
+                ):
                     wind = date_data["wind_speed"].values
                     if len(wind) > 1 and np.std(wind) > 0:
                         corr, _ = stats.pearsonr(power, wind)
-                        corr_data["wind_speed_power_correlation"] = corr if not np.isnan(corr) else None
+                        corr_data["wind_speed_power_correlation"] = (
+                            corr if not np.isnan(corr) else None
+                        )
                     else:
                         corr_data["wind_speed_power_correlation"] = None
                 else:
                     corr_data["wind_speed_power_correlation"] = None
-                
+
                 # Precipitation correlation
-                if "precipitation" in date_data.columns and date_data["precipitation"].notna().sum() > 1:
+                if (
+                    "precipitation" in date_data.columns
+                    and date_data["precipitation"].notna().sum() > 1
+                ):
                     precip = date_data["precipitation"].values
                     if len(precip) > 1 and np.std(precip) > 0:
                         corr, _ = stats.pearsonr(power, precip)
-                        corr_data["precipitation_power_correlation"] = corr if not np.isnan(corr) else None
+                        corr_data["precipitation_power_correlation"] = (
+                            corr if not np.isnan(corr) else None
+                        )
                     else:
                         corr_data["precipitation_power_correlation"] = None
                 else:
                     corr_data["precipitation_power_correlation"] = None
-                
+
                 correlations.append(corr_data)
-            
+
             # Delete existing correlations for the period
             cursor = conn.cursor()
             delete_query = """
@@ -475,9 +525,12 @@ def compute_weather_correlations(
                 WHERE aggregation_period = ? AND date_utc >= CAST(? AS DATE) AND date_utc <= CAST(? AS DATE)
             """
             if start_date and end_date:
-                cursor.execute(delete_query, (aggregation_period, start_date.date(), end_date.date()))
+                cursor.execute(
+                    delete_query,
+                    (aggregation_period, start_date.date(), end_date.date()),
+                )
                 conn.commit()
-            
+
             # Insert correlations
             insert_query = """
                 INSERT INTO weather_correlations (
@@ -490,56 +543,85 @@ def compute_weather_correlations(
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
-            
+
             rows_inserted = 0
             for corr_data in correlations:
                 try:
-                    cursor.execute(insert_query, (
-                        corr_data["date_utc"],
-                        corr_data["aggregation_period"],
-                        corr_data.get("temp_power_correlation"),
-                        corr_data.get("humidity_power_correlation"),
-                        corr_data.get("pressure_power_correlation"),
-                        corr_data.get("wind_speed_power_correlation"),
-                        corr_data.get("precipitation_power_correlation"),
-                        corr_data.get("temp_power_slope"),
-                        corr_data.get("temp_power_intercept"),
-                        corr_data.get("temp_power_r_squared"),
-                        corr_data["sample_count"]
-                    ))
+                    cursor.execute(
+                        insert_query,
+                        (
+                            corr_data["date_utc"],
+                            corr_data["aggregation_period"],
+                            corr_data.get("temp_power_correlation"),
+                            corr_data.get("humidity_power_correlation"),
+                            corr_data.get("pressure_power_correlation"),
+                            corr_data.get("wind_speed_power_correlation"),
+                            corr_data.get("precipitation_power_correlation"),
+                            corr_data.get("temp_power_slope"),
+                            corr_data.get("temp_power_intercept"),
+                            corr_data.get("temp_power_r_squared"),
+                            corr_data["sample_count"],
+                        ),
+                    )
                     rows_inserted += 1
                 except Exception as exc:
-                    logger.warning("Failed to insert correlation for %s: %s", corr_data["date_utc"], exc)
-            
+                    logger.warning(
+                        "Failed to insert correlation for %s: %s",
+                        corr_data["date_utc"],
+                        exc,
+                    )
+
             conn.commit()
             logger.info("Created %d weather correlation records", rows_inserted)
             return rows_inserted
-            
+
     except Exception as exc:
         logger.error("Failed to compute weather correlations: %s", exc, exc_info=True)
         raise
 
 
+def clear_feature_engineering_tables(connection_string: str):
+    logger.info("Clearing old feature-engineering tables...")
+
+    tables = [
+        "power_consumption_daily",
+        "peak_load_stats",
+        "weather_correlations",
+    ]
+
+    with pyodbc.connect(connection_string, timeout=60) as conn:
+        cursor = conn.cursor()
+
+        for t in tables:
+            try:
+                cursor.execute(f"DELETE FROM {t};")
+                logger.info(f"Cleared table: {t}")
+            except Exception as e:
+                logger.warning(f"Could not clear table {t}: {e}")
+
+        conn.commit()
+
+
 def run_all_feature_engineering(
     connection_string: str,
     start_date: Optional[datetime] = None,
-    end_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None,
 ) -> dict:
     """
     Run all feature engineering tasks.
-    
+
     Returns:
         Dictionary with counts of records created for each feature table
     """
     logger.info("Running all feature engineering tasks")
-    
+    clear_feature_engineering_tables(connection_string)
     results = {}
-    
+
     # Daily aggregates
     results["daily_aggregates"] = compute_daily_aggregates(
         connection_string, start_date, end_date
     )
-    
+
     # Peak load statistics (daily and monthly)
     results["peak_load_daily"] = compute_peak_load_stats(
         connection_string, start_date, end_date, "daily"
@@ -547,12 +629,11 @@ def run_all_feature_engineering(
     results["peak_load_monthly"] = compute_peak_load_stats(
         connection_string, start_date, end_date, "monthly"
     )
-    
+
     # Weather correlations (daily)
     results["weather_correlations_daily"] = compute_weather_correlations(
         connection_string, start_date, end_date, "daily"
     )
-    
+
     logger.info("Feature engineering completed: %s", results)
     return results
-

@@ -3,11 +3,13 @@
 ## Setup
 
 1. **Install Dependencies**:
+
 ```bash
 pip install -r requirements.txt
 ```
 
 2. **Set Environment Variables** (optional):
+
 ```bash
 export SQL_CONNECTION_STRING="DRIVER={ODBC Driver 18 for SQL Server};SERVER=..."
 export AZURE_CONNECTION_STRING="DefaultEndpointsProtocol=https;..."
@@ -30,8 +32,7 @@ python -c "from db_schema import create_time_series_schema; \
 python batch_pipeline.py \
     --data-source processed_power_and_weather.csv \
     --source-type csv \
-    --create-schema \
-    --sql-connection "YOUR_CONNECTION_STRING"
+    --create-schema
 ```
 
 ### Step 3: Verify Data
@@ -89,7 +90,7 @@ ORDER BY peak_load_value DESC;
 ### Weather-Power Correlation
 
 ```sql
-SELECT 
+SELECT
     AVG(temp_power_correlation) as avg_temp_correlation,
     AVG(humidity_power_correlation) as avg_humidity_correlation
 FROM weather_correlations
@@ -102,6 +103,7 @@ WHERE aggregation_period = 'daily'
 ### Linux/Mac (Cron)
 
 Add to crontab (`crontab -e`):
+
 ```
 0 2 * * * cd /path/to/project && python batch_pipeline.py \
     --data-source processed/processed_power_and_weather.csv \
@@ -122,19 +124,23 @@ Add to crontab (`crontab -e`):
 ## Troubleshooting
 
 ### Connection Issues
+
 - Verify connection string format
 - Check firewall rules for Azure SQL Database
 - Ensure ODBC driver is installed
 
 ### Partitioning Errors
+
 - The system will fall back to non-partitioned table if partitioning fails
 - Check SQL Server version (partitioning requires Enterprise or Standard edition)
 
 ### Memory Issues
+
 - Reduce batch size: `--batch-size 500`
 - Process data in smaller date ranges
 
 ### Duplicate Data
+
 - Use upsert mode (default): `--upsert-mode` (already default)
 - Or use insert-only: `--insert-only` (may fail on duplicates)
 
@@ -143,4 +149,3 @@ Add to crontab (`crontab -e`):
 - Review `PIPELINE_DOCUMENTATION.md` for detailed documentation
 - Explore feature engineering options in `feature_engineering.py`
 - Customize schema in `db_schema.py` for your needs
-

@@ -15,12 +15,14 @@ from azure.storage.blob import BlobServiceClient
 
 from db_schema import create_time_series_schema, get_schema_info
 from feature_engineering import run_all_feature_engineering
+import feature_engineering
 from ingestion_pipeline import (
     check_existing_data,
     ingest_data_streaming,
     load_data_from_azure,
     load_data_from_csv,
     prepare_data_for_db,
+    reset_main_table,
     upsert_data,
 )
 
@@ -67,7 +69,7 @@ def run_batch_pipeline(
 ) -> dict:
     """
     Run the complete batch pipeline.
-    
+
     Args:
         connection_string: Database connection string
         data_source: Path to CSV or blob name
@@ -78,7 +80,7 @@ def run_batch_pipeline(
         run_feature_engineering: Whether to run feature engineering
         batch_size: Batch size for ingestion
         upsert_mode: Use upsert instead of insert
-    
+
     Returns:
         Dictionary with pipeline results
     """
@@ -86,9 +88,9 @@ def run_batch_pipeline(
         "schema_created": False,
         "rows_ingested": 0,
         "feature_engineering": {},
-        "errors": []
+        "errors": [],
     }
-    
+
     try:
         # Step 1: Create schema if needed
         if create_schema:
@@ -96,7 +98,7 @@ def run_batch_pipeline(
             create_time_series_schema(connection_string)
             results["schema_created"] = True
             logger.info("Schema created successfully")
-        
+
         # Step 2: Check existing data
         existing_data = check_existing_data(connection_string)
         if existing_data.get("exists"):
@@ -106,47 +108,53 @@ def run_batch_pipeline(
                 existing_data.get("min_date"),
                 existing_data.get("max_date"),
             )
-        
+
         # Step 3: Load data
         logger.info("Loading data from %s: %s", source_type, data_source)
         if source_type == "csv":
             df = load_data_from_csv(Path(data_source))
         elif source_type == "azure":
             if not azure_connection_string or not container_name:
-                raise ValueError("azure_connection_string and container_name required for Azure source")
-            df = load_data_from_azure(azure_connection_string, container_name, data_source)
+                raise ValueError(
+                    "azure_connection_string and container_name required for Azure source"
+                )
+            df = load_data_from_azure(
+                azure_connection_string, container_name, data_source
+            )
         else:
             raise ValueError(f"Unknown source_type: {source_type}")
-        
+        reset_main_table(connection_string)
+
         # Step 4: Ingest data
         logger.info("Ingesting data into database...")
         if upsert_mode:
             rows_ingested = upsert_data(connection_string, df, batch_size)
         else:
             from ingestion_pipeline import ingest_data_batch
+
             rows_ingested = ingest_data_batch(connection_string, df, batch_size)
-        
+
         results["rows_ingested"] = rows_ingested
         logger.info("Ingested %d rows", rows_ingested)
-        
+
         # Step 5: Run feature engineering
         if run_feature_engineering:
             logger.info("Running feature engineering...")
             feature_results = run_all_feature_engineering(connection_string)
             results["feature_engineering"] = feature_results
             logger.info("Feature engineering completed")
-        
+
         # Step 6: Get schema info
         schema_info = get_schema_info(connection_string)
         results["schema_info"] = schema_info
-        
+
         logger.info("Batch pipeline completed successfully")
-        
+
     except Exception as exc:
         logger.error("Batch pipeline failed: %s", exc, exc_info=True)
         results["errors"].append(str(exc))
         raise
-    
+
     return results
 
 
@@ -155,7 +163,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Automated batch pipeline for data ingestion and feature engineering."
     )
-    
+
     parser.add_argument(
         "--data-source",
         required=True,
@@ -208,34 +216,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Enable debug logging",
     )
-    
+
     args = parser.parse_args(argv)
     configure_logging(args.verbose)
-    
+
     try:
         results = run_batch_pipeline(
             connection_string=args.sql_connection,
             data_source=args.data_source,
             source_type=args.source_type,
-            azure_connection_string=args.azure_connection if args.source_type == "azure" else None,
+            azure_connection_string=(
+                args.azure_connection if args.source_type == "azure" else None
+            ),
             container_name=args.container_name if args.source_type == "azure" else None,
             create_schema=args.create_schema,
             run_feature_engineering=not args.skip_features,
             batch_size=args.batch_size,
             upsert_mode=not args.insert_only,
         )
-        
+
         logger.info("Pipeline Results:")
         logger.info("  Schema created: %s", results["schema_created"])
         logger.info("  Rows ingested: %d", results["rows_ingested"])
         logger.info("  Feature engineering: %s", results.get("feature_engineering", {}))
-        
+
         if results.get("schema_info"):
             logger.info("  Tables: %d", len(results["schema_info"].get("tables", [])))
-            logger.info("  Partitions: %d", len(results["schema_info"].get("partitions", [])))
-        
+            logger.info(
+                "  Partitions: %d", len(results["schema_info"].get("partitions", []))
+            )
+
         return 0
-        
+
     except Exception as exc:
         logger.exception("Pipeline failed: %s", exc)
         return 1
@@ -243,4 +255,3 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

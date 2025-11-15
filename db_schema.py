@@ -12,54 +12,87 @@ import pyodbc
 logger = logging.getLogger(__name__)
 
 
-def create_time_series_schema(connection_string: str) -> None:
-    """
-    Create database schema optimized for time-series data with partitioning.
-    
-    Tables created:
-    - power_consumption_hourly: Main time-series table with partitioning by month
-    - power_consumption_daily: Daily aggregated features
-    - peak_load_stats: Peak load statistics by day/month
-    - weather_correlations: Weather-energy correlation metrics
-    """
-    logger.info("Creating time-series database schema...")
-    
+# def create_time_series_schema(connection_string: str) -> None:
+#     """
+#     Create database schema optimized for time-series data with partitioning.
+
+#     Tables created:
+#     - power_consumption_hourly: Main time-series table with partitioning by month
+#     - power_consumption_daily: Daily aggregated features
+#     - peak_load_stats: Peak load statistics by day/month
+#     - weather_correlations: Weather-energy correlation metrics
+#     """
+#     logger.info("Creating time-series database schema...")
+
+#     try:
+#         with pyodbc.connect(connection_string, timeout=30) as conn:
+#             cursor = conn.cursor()
+
+#             # Create main time-series table with partitioning
+#             create_main_table(cursor)
+
+#             # Create aggregated feature tables
+#             create_daily_aggregates_table(cursor)
+#             create_peak_load_stats_table(cursor)
+#             create_weather_correlations_table(cursor)
+
+#             # Create indexes for query performance
+#             create_indexes(cursor)
+
+#             conn.commit()
+#             logger.info("Database schema created successfully")
+
+#     except Exception as exc:
+#         logger.error("Failed to create database schema: %s", exc, exc_info=True)
+#         raise
+
+
+def create_time_series_schema(connection_string: str):
     try:
-        with pyodbc.connect(connection_string, timeout=30) as conn:
+        with pyodbc.connect(connection_string, timeout=60) as conn:
             cursor = conn.cursor()
-            
-            # Create main time-series table with partitioning
+
+            # Check if table exists
+            cursor.execute(
+                """
+                SELECT COUNT(*)
+                FROM sys.tables
+                WHERE name = 'power_consumption_hourly';
+            """
+            )
+            exists = cursor.fetchone()[0]
+
+            if exists:
+                logger.info("Main table already exists — skipping schema creation.")
+                return
+
+            # If not exists, create everything
+            logger.info("Creating time-series schema...")
             create_main_table(cursor)
-            
-            # Create aggregated feature tables
-            create_daily_aggregates_table(cursor)
-            create_peak_load_stats_table(cursor)
-            create_weather_correlations_table(cursor)
-            
-            # Create indexes for query performance
-            create_indexes(cursor)
-            
+
             conn.commit()
-            logger.info("Database schema created successfully")
-            
-    except Exception as exc:
-        logger.error("Failed to create database schema: %s", exc, exc_info=True)
+            logger.info("Schema created successfully.")
+    except Exception as e:
+        logger.error("Schema creation failed: %s", e)
         raise
 
 
 def create_main_table(cursor: pyodbc.Cursor) -> None:
     """Create the main time-series table with partitioning support."""
-    
+
     # Drop table if exists
-    cursor.execute("""
+    cursor.execute(
+        """
         IF OBJECT_ID('power_consumption_hourly', 'U') IS NOT NULL
         DROP TABLE power_consumption_hourly;
-    """)
-    
+    """
+    )
+
     # Create main table with partitioning by month
     # SQL Server partitioning requires a partition function and scheme
     # For simplicity, we'll use a computed column for partitioning key
-    cursor.execute("""
+    cursor.execute(
+        """
         CREATE TABLE power_consumption_hourly (
             id BIGINT IDENTITY(1,1) PRIMARY KEY,
             datetime_utc DATETIME2 NOT NULL,
@@ -101,15 +134,19 @@ def create_main_table(cursor: pyodbc.Cursor) -> None:
             CONSTRAINT CK_datetime_valid CHECK (datetime_utc >= '2000-01-01'),
             CONSTRAINT CK_power_positive CHECK (global_active_power >= 0)
         );
-    """)
-    
+    """
+    )
+
     # Create partition function (monthly partitioning)
     try:
-        cursor.execute("""
+        cursor.execute(
+            """
             IF EXISTS (SELECT * FROM sys.partition_functions WHERE name = 'PF_PowerConsumption_Monthly')
             DROP PARTITION FUNCTION PF_PowerConsumption_Monthly;
-        """)
-        cursor.execute("""
+        """
+        )
+        cursor.execute(
+            """
             CREATE PARTITION FUNCTION PF_PowerConsumption_Monthly (VARCHAR(7))
             AS RANGE RIGHT FOR VALUES 
             ('2006-12', '2007-01', '2007-02', '2007-03', '2007-04', '2007-05', '2007-06',
@@ -120,22 +157,28 @@ def create_main_table(cursor: pyodbc.Cursor) -> None:
              '2009-07', '2009-08', '2009-09', '2009-10', '2009-11', '2009-12',
              '2010-01', '2010-02', '2010-03', '2010-04', '2010-05', '2010-06',
              '2010-07', '2010-08', '2010-09', '2010-10', '2010-11', '2010-12');
-        """)
-        
+        """
+        )
+
         # Create partition scheme
-        cursor.execute("""
+        cursor.execute(
+            """
             IF EXISTS (SELECT * FROM sys.partition_schemes WHERE name = 'PS_PowerConsumption_Monthly')
             DROP PARTITION SCHEME PS_PowerConsumption_Monthly;
-        """)
-        cursor.execute("""
+        """
+        )
+        cursor.execute(
+            """
             CREATE PARTITION SCHEME PS_PowerConsumption_Monthly
             AS PARTITION PF_PowerConsumption_Monthly
             ALL TO ([PRIMARY]);
-        """)
-        
+        """
+        )
+
         # Recreate table with partition scheme
         cursor.execute("DROP TABLE power_consumption_hourly;")
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE power_consumption_hourly (
                 id BIGINT IDENTITY(1,1),
                 datetime_utc DATETIME2 NOT NULL,
@@ -173,12 +216,16 @@ def create_main_table(cursor: pyodbc.Cursor) -> None:
                 CONSTRAINT CK_datetime_valid CHECK (datetime_utc >= '2000-01-01'),
                 CONSTRAINT CK_power_positive CHECK (global_active_power >= 0)
             ) ON PS_PowerConsumption_Monthly(year_month);
-        """)
+        """
+        )
         logger.info("Created partitioned table: power_consumption_hourly")
     except Exception as exc:
-        logger.warning("Partitioning setup failed, using non-partitioned table: %s", exc)
+        logger.warning(
+            "Partitioning setup failed, using non-partitioned table: %s", exc
+        )
         # Fallback to non-partitioned table
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE power_consumption_hourly (
                 id BIGINT IDENTITY(1,1) PRIMARY KEY,
                 datetime_utc DATETIME2 NOT NULL,
@@ -215,17 +262,21 @@ def create_main_table(cursor: pyodbc.Cursor) -> None:
                 CONSTRAINT CK_datetime_valid CHECK (datetime_utc >= '2000-01-01'),
                 CONSTRAINT CK_power_positive CHECK (global_active_power >= 0)
             );
-        """)
+        """
+        )
 
 
 def create_daily_aggregates_table(cursor: pyodbc.Cursor) -> None:
     """Create table for daily aggregated features."""
-    cursor.execute("""
+    cursor.execute(
+        """
         IF OBJECT_ID('power_consumption_daily', 'U') IS NOT NULL
         DROP TABLE power_consumption_daily;
-    """)
-    
-    cursor.execute("""
+    """
+    )
+
+    cursor.execute(
+        """
         CREATE TABLE power_consumption_daily (
             id BIGINT IDENTITY(1,1) PRIMARY KEY,
             date_utc DATE NOT NULL UNIQUE,
@@ -265,18 +316,22 @@ def create_daily_aggregates_table(cursor: pyodbc.Cursor) -> None:
             created_at DATETIME2 DEFAULT GETUTCDATE(),
             updated_at DATETIME2 DEFAULT GETUTCDATE()
         );
-    """)
+    """
+    )
     logger.info("Created table: power_consumption_daily")
 
 
 def create_peak_load_stats_table(cursor: pyodbc.Cursor) -> None:
     """Create table for peak load statistics."""
-    cursor.execute("""
+    cursor.execute(
+        """
         IF OBJECT_ID('peak_load_stats', 'U') IS NOT NULL
         DROP TABLE peak_load_stats;
-    """)
-    
-    cursor.execute("""
+    """
+    )
+
+    cursor.execute(
+        """
         CREATE TABLE peak_load_stats (
             id BIGINT IDENTITY(1,1) PRIMARY KEY,
             date_utc DATE NOT NULL,
@@ -298,18 +353,22 @@ def create_peak_load_stats_table(cursor: pyodbc.Cursor) -> None:
             
             CONSTRAINT UQ_peak_load_date_period UNIQUE (date_utc, aggregation_period)
         );
-    """)
+    """
+    )
     logger.info("Created table: peak_load_stats")
 
 
 def create_weather_correlations_table(cursor: pyodbc.Cursor) -> None:
     """Create table for weather-energy correlation metrics."""
-    cursor.execute("""
+    cursor.execute(
+        """
         IF OBJECT_ID('weather_correlations', 'U') IS NOT NULL
         DROP TABLE weather_correlations;
-    """)
-    
-    cursor.execute("""
+    """
+    )
+
+    cursor.execute(
+        """
         CREATE TABLE weather_correlations (
             id BIGINT IDENTITY(1,1) PRIMARY KEY,
             date_utc DATE NOT NULL,
@@ -335,57 +394,65 @@ def create_weather_correlations_table(cursor: pyodbc.Cursor) -> None:
             
             CONSTRAINT UQ_weather_corr_date_period UNIQUE (date_utc, aggregation_period)
         );
-    """)
+    """
+    )
     logger.info("Created table: weather_correlations")
 
 
 def create_indexes(cursor: pyodbc.Cursor) -> None:
     """Create indexes for query performance."""
-    
+
     # Main table indexes
-    cursor.execute("""
+    cursor.execute(
+        """
         CREATE NONCLUSTERED INDEX IX_power_consumption_datetime 
         ON power_consumption_hourly(datetime_utc);
-    """)
-    
-    cursor.execute("""
+    """
+    )
+
+    cursor.execute(
+        """
         CREATE NONCLUSTERED INDEX IX_power_consumption_year_month 
         ON power_consumption_hourly(year_month);
-    """)
-    
-    cursor.execute("""
+    """
+    )
+
+    cursor.execute(
+        """
         CREATE NONCLUSTERED INDEX IX_power_consumption_hour_day 
         ON power_consumption_hourly(hour_of_day, day_of_week);
-    """)
-    
+    """
+    )
+
     # Daily aggregates indexes
-    cursor.execute("""
+    cursor.execute(
+        """
         CREATE NONCLUSTERED INDEX IX_daily_date 
         ON power_consumption_daily(date_utc);
-    """)
-    
-    cursor.execute("""
+    """
+    )
+
+    cursor.execute(
+        """
         CREATE NONCLUSTERED INDEX IX_daily_month_weekend 
         ON power_consumption_daily(month_of_year, is_weekend);
-    """)
-    
+    """
+    )
+
     logger.info("Created indexes for query optimization")
 
 
 def get_schema_info(connection_string: str) -> dict:
     """Get information about the database schema."""
-    info = {
-        "tables": [],
-        "indexes": [],
-        "partitions": []
-    }
-    
+    info = {"tables": [], "indexes": [], "partitions": []}
+
     try:
         with pyodbc.connect(connection_string, timeout=30) as conn:
             cursor = conn.cursor()
-            
+
             # Get table information
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT TABLE_NAME, 
                        (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS 
                         WHERE TABLE_NAME = t.TABLE_NAME) as COLUMN_COUNT
@@ -393,32 +460,29 @@ def get_schema_info(connection_string: str) -> dict:
                 WHERE TABLE_TYPE = 'BASE TABLE'
                 AND TABLE_NAME LIKE 'power_%' OR TABLE_NAME LIKE 'peak_%' OR TABLE_NAME LIKE 'weather_%'
                 ORDER BY TABLE_NAME;
-            """)
-            
+            """
+            )
+
             for row in cursor.fetchall():
-                info["tables"].append({
-                    "name": row[0],
-                    "column_count": row[1]
-                })
-            
+                info["tables"].append({"name": row[0], "column_count": row[1]})
+
             # Get partition information
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT p.partition_number, p.rows, pf.name as partition_function
                 FROM sys.partitions p
                 INNER JOIN sys.partition_functions pf ON p.function_id = pf.function_id
                 WHERE OBJECT_NAME(p.object_id) = 'power_consumption_hourly'
                 ORDER BY p.partition_number;
-            """)
-            
+            """
+            )
+
             for row in cursor.fetchall():
-                info["partitions"].append({
-                    "partition_number": row[0],
-                    "rows": row[1],
-                    "function": row[2]
-                })
-                
+                info["partitions"].append(
+                    {"partition_number": row[0], "rows": row[1], "function": row[2]}
+                )
+
     except Exception as exc:
         logger.warning("Could not retrieve schema info: %s", exc)
-    
-    return info
 
+    return info
