@@ -150,8 +150,10 @@ def load_power_dataframe(raw_bytes: bytes) -> pd.DataFrame:
 
 def resample_to_hourly(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Resampling power data to hourly frequency")
+    df["Global_active_power"] = df["Global_active_power"] * 1000 / 60
+
     aggregation_rules = {
-        "Global_active_power": "mean",
+        "Global_active_power": "sum",
         "Global_reactive_power": "mean",
         "Voltage": "mean",
         "Global_intensity": "mean",
