@@ -1,1 +1,1 @@
-# iitjCapstone
+IIT Jodhpur Capstone Project
